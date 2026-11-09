@@ -10,6 +10,8 @@ from urllib.parse import quote
 import httpx
 from PIL import Image
 
+from app.core.assets import part_path
+
 log = logging.getLogger("app.media.images")
 
 
@@ -18,9 +20,12 @@ class ImageError(RuntimeError):
 
 
 def is_valid_image(path: str | Path) -> bool:
+    """True if ``path`` is a complete, decodable image (catches truncated files too)."""
     try:
         with Image.open(path) as im:
             im.verify()
+        with Image.open(path) as im:  # verify() misses truncated data; decoding does not
+            im.load()
         return True
     except Exception:
         return False
@@ -47,8 +52,10 @@ class ImageGenerator:
                 resp.raise_for_status()
                 if not resp.headers.get("content-type", "").startswith("image/"):
                     raise ImageError(f"not an image ({resp.headers.get('content-type')})")
+                tmp = part_path(output_path)  # never leave a half-written file under the final name
                 with Image.open(io.BytesIO(resp.content)) as im:
-                    im.convert("RGB").save(output_path, "JPEG", quality=92)
+                    im.convert("RGB").save(tmp, "JPEG", quality=92)
+                tmp.replace(output_path)
                 return output_path
             except (httpx.HTTPError, ImageError, OSError) as e:
                 last = str(e) or type(e).__name__

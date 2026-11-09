@@ -50,7 +50,11 @@ class FakeLLM:
 
 
 class FakeTTS:
+    def __init__(self):
+        self.calls: list[str] = []
+
     async def synthesize(self, text: str, output_path: Path, **_) -> Path:
+        self.calls.append(text)
         subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
                         "sine=frequency=440:duration=1", str(output_path)], check=True)
         return output_path

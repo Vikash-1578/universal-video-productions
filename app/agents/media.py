@@ -1,9 +1,11 @@
 """Agent 7: Media Agent."""
 from __future__ import annotations
 from app.core.agent import BaseAgent
+from app.core.assets import fingerprint, remove_stale, scene_asset
 from app.media.images import is_valid_image
 import asyncio
 import logging
+from pathlib import Path
 
 log = logging.getLogger("app.agents.media")
 
@@ -15,19 +17,28 @@ class MediaAgent(BaseAgent):
 
     async def execute(self, project_id: int, state: dict) -> dict:
         media_dir = self.hub.projects.folder(project_id, "assets", "media")
-        # On a retry sent back by the media checker, keep the images that were fine.
-        retry = bool(state.get("feedback", {}).get("SOURCING_MEDIA"))
         width, height = self.hub.settings.video_width, self.hub.settings.video_height
         sem = asyncio.Semaphore(self.concurrency)
+        reused = 0
 
         async def one(scene: dict) -> dict:
-            path = media_dir / f"scene_{scene['index']}.jpg"
-            if not (retry and is_valid_image(path)):
+            nonlocal reused
+            prompt = f"{scene['visual']}, {STYLE}"
+            path = scene_asset(media_dir, scene["index"], fingerprint(prompt, width, height), ".jpg")
+            # Reuse images from an interrupted run, or ones the media checker did not
+            # reject; anything missing or corrupt is generated again.
+            if is_valid_image(path):
+                reused += 1
+            else:
                 async with sem:
-                    await self.hub.images.generate(f"{scene['visual']}, {STYLE}", path, width, height)
+                    await self.hub.images.generate(prompt, path, width, height)
             return {**scene, "image": str(path)}
 
-        return {"scenes": list(await asyncio.gather(*(one(s) for s in state.get("scenes", []))))}
+        scenes = list(await asyncio.gather(*(one(s) for s in state.get("scenes", []))))
+        remove_stale(media_dir, {Path(s["image"]).name for s in scenes}, "scene_*.jpg")
+        if reused:
+            log.info("Project %s: reused %d/%d existing images", project_id, reused, len(scenes))
+        return {"scenes": scenes}
 
     async def verify(self, project_id: int, output: dict) -> bool:
         scenes = output.get("scenes", [])
