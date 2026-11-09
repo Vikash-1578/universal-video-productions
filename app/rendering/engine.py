@@ -1,32 +1,61 @@
 from __future__ import annotations
+import asyncio
 import logging
 from pathlib import Path
-from moviepy import ImageClip, AudioFileClip, concatenate_videoclips, CompositeAudioClip, ColorClip, TextClip
-from moviepy.video.fx.all import resize
+
+from moviepy import AudioFileClip, CompositeVideoClip, ImageClip, concatenate_videoclips, vfx
 
 log = logging.getLogger('app.rendering.engine')
 
+
 class RenderEngine:
-    def __init__(self, base_dir: Path): self.base_dir = base_dir
-    def _apply_zoom_effect(self, clip, duration): return clip.resize(lambda t: 1 + 0.1 * (t / duration))
-    async def render_project(self, hub, project_id: int) -> Path:
-        project = hub.projects.get_project(project_id)
-        scenes = hub.storyboards.scenes(project_id)
-        if not scenes: raise ValueError('Storyboard is empty')
-        export_dir = hub.projects.folder(project_id, 'exports')
-        export_dir.mkdir(parents=True, exist_ok=True)
-        final_clips = []
-        for idx, scene in enumerate(scenes):
-            audio_path = export_dir / f'scene_{idx+1}.mp3'
-            image_path = export_dir / f'scene_{idx+1}.jpg'
-            if not audio_path.exists(): await hub.tts.synthesize(scene.get('description', ''), audio_path)
-            if not image_path.exists(): await hub.free_gen.generate(scene.get('description', ''), image_path)
-            audio_clip = AudioFileClip(str(audio_path))
-            img_clip = ImageClip(str(image_path)).set_duration(audio_clip.duration)
-            img_clip = self._apply_zoom_effect(img_clip, audio_clip.duration)
-            img_clip = img_clip.set_audio(audio_clip).crossfadein(0.5).crossfadeout(0.5)
-            final_clips.append(img_clip)
-        video = concatenate_videoclips(final_clips, method='compose')
-        output_file = export_dir / 'final_pro_video.mp4'
-        video.write_videofile(str(output_file), fps=24, codec='libx264', audio_codec='aac', preset='ultrafast', threads=4)
-        return output_file
+    """Turns scenes (image + narration audio) into one MP4 with moviepy 2.x."""
+
+    def __init__(self, fps: int = 30, size: tuple[int, int] = (1280, 720), zoom: float = 0.08,
+                 fade: float = 0.4, tail: float = 0.3, preset: str = 'veryfast', threads: int = 4):
+        self.fps, self.size, self.zoom, self.fade, self.tail = fps, size, zoom, fade, tail
+        self.preset, self.threads = preset, threads
+
+    async def render(self, scenes: list[dict], output_path: Path) -> Path:
+        """Render scenes that each have "image" and "audio" paths. Runs off the event loop."""
+        missing = [s.get('index') for s in scenes if not s.get('image') or not s.get('audio')]
+        if not scenes:
+            raise ValueError('No scenes to render')
+        if missing:
+            raise ValueError(f'Scenes missing image or audio: {missing}')
+        return await asyncio.to_thread(self._render_sync, scenes, Path(output_path))
+
+    def _scene_clip(self, scene: dict, opened: list):
+        width, height = self.size
+        audio = AudioFileClip(str(scene['audio']))
+        opened.append(audio)
+        duration = audio.duration + self.tail
+        image = ImageClip(str(scene['image'])).with_duration(duration)
+        cover = max(width / image.w, height / image.h)  # fill the frame, crop the overflow
+        zoom = self.zoom
+        moving = image.resized(lambda t: cover * (1 + zoom * t / duration)).with_position('center')
+        return (CompositeVideoClip([moving], size=self.size)
+                .with_duration(duration)
+                .with_audio(audio)
+                .with_effects([vfx.FadeIn(self.fade), vfx.FadeOut(self.fade)]))
+
+    def _render_sync(self, scenes: list[dict], output_path: Path) -> Path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        opened: list = []
+        try:
+            clips = [self._scene_clip(s, opened) for s in scenes]
+            opened.extend(clips)
+            video = concatenate_videoclips(clips, method='chain')
+            opened.append(video)
+            tmp = output_path.with_name(output_path.stem + '.part.mp4')
+            video.write_videofile(str(tmp), fps=self.fps, codec='libx264', audio_codec='aac',
+                                  preset=self.preset, threads=self.threads, logger=None)
+            tmp.replace(output_path)
+            log.info('Rendered %s (%.1fs, %d scenes)', output_path, video.duration, len(scenes))
+            return output_path
+        finally:
+            for clip in reversed(opened):
+                try:
+                    clip.close()
+                except Exception:
+                    pass

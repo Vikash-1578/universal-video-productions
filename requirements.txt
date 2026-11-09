@@ -1,0 +1,4 @@
+httpx>=0.27
+edge-tts>=6.1
+moviepy>=2.1,<3
+Pillow>=10
