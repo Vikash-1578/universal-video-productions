@@ -81,3 +81,6 @@ groq = "llama-3.3-70b-versatile"
 ```bash
 pip install -r requirements-dev.txt && pytest
 ```
+
+GitHub Actions runs the tests on Python 3.11 and 3.13 for every pull request and push to `main`
+(`.github/workflows/tests.yml`). They need no API keys or network access to the services.

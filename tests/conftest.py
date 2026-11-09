@@ -11,6 +11,18 @@ from app.core.agent import BaseAgent
 from app.core.config import Settings
 from app.hub import Hub
 
+def ffmpeg_exe() -> str:
+    """System ffmpeg if installed, else the binary bundled with moviepy (imageio-ffmpeg)."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pytest.skip("ffmpeg not available")
+
+
 SCRIPT = "\n\n".join(
     f"[Scene {i}]\nVisual: A dark ancient temple, shot {i}\nNarration: Yeh scene number {i} ki kahani hai, dosto."
     for i in range(1, 5)
@@ -55,7 +67,7 @@ class FakeTTS:
 
     async def synthesize(self, text: str, output_path: Path, **_) -> Path:
         self.calls.append(text)
-        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+        subprocess.run([ffmpeg_exe(), "-loglevel", "error", "-y", "-f", "lavfi", "-i",
                         "sine=frequency=440:duration=1", str(output_path)], check=True)
         return output_path
 
@@ -96,8 +108,7 @@ def make_hub(settings, monkeypatch):
     """Hub with fake services. The video checker is stubbed unless real_render=True."""
     def factory(llm=None, real_render=False, **kw):
         if real_render:
-            if not shutil.which("ffmpeg"):
-                pytest.skip("ffmpeg not installed")
+            ffmpeg_exe()  # skips the test if there is no ffmpeg at all
             from app.rendering.engine import RenderEngine
             renderer = RenderEngine(fps=settings.fps, size=(settings.video_width, settings.video_height))
         else:
