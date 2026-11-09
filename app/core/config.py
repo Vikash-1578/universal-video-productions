@@ -31,6 +31,7 @@ def parse_keys(text: str) -> list[tuple[str, str]]:
 class Settings:
     bot_token: str = ""
     owner_id: int = 0
+    allowed_user_ids: list[int] = field(default_factory=list)
     base_dir: Path = field(default_factory=Path.cwd)
     data_dir: Path = Path("data")
     keys: list[tuple[str, str]] = field(default_factory=list)
@@ -71,6 +72,10 @@ def load_settings(base_dir: Path | None = None, env: dict[str, str] | None = Non
     owner_raw = env.get("OWNER_ID") or str(hub.get("owner_id", "")) or env.get("TELEGRAM_ALLOWED_USER_IDS", "").split(",")[0]
     try: owner = int(str(owner_raw).strip() or 0)
     except ValueError: owner = 0
+    allowed: list[int] = [owner] if owner else []
+    for part in [*str(env.get("TELEGRAM_ALLOWED_USER_IDS", "")).split(","), *map(str, hub.get("allowed_user_ids", []))]:
+        part = part.strip()
+        if part.lstrip("-").isdigit() and int(part) not in allowed: allowed.append(int(part))
     keys_file = base / env.get("AI_KEYS_FILE", "keys.txt")
     keys = parse_keys(keys_file.read_text(encoding="utf-8-sig")) if keys_file.exists() else []
     keys += parse_keys(env.get("AI_KEYS", "").replace(",", "\n"))
@@ -87,7 +92,7 @@ def load_settings(base_dir: Path | None = None, env: dict[str, str] | None = Non
     render = raw.get("render", {})
     return Settings(
         bot_token=env.get("BOT_TOKEN", "") or env.get("TELEGRAM_BOT_TOKEN", ""),
-        owner_id=owner, base_dir=base, data_dir=data_dir, keys=keys,
+        owner_id=owner, allowed_user_ids=allowed, base_dir=base, data_dir=data_dir, keys=keys,
         timezone=env.get("HUB_TZ") or hub.get("timezone", "Asia/Kolkata"),
         max_heavy_workers=int(hub.get("max_heavy_workers", 1)),
         max_light_workers=int(hub.get("max_light_workers", 2)),
