@@ -11,7 +11,7 @@ def load_dotenv(path: Path) -> dict[str, str]:
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line: continue
         k, _, v = line.partition("=")
-        v = v.strip().strip("'"")
+        v = v.strip().strip("'\"")
         out[k.strip()] = v
     return out
 
@@ -23,7 +23,7 @@ def parse_keys(text: str) -> list[tuple[str, str]]:
         m = re.match(r"^([A-Za-z][A-Za-z0-9_ .-]*?)\s*[:=]\s*(.+)$", line)
         if not m: continue
         name = m.group(1).strip().lower().replace(" ", "_").replace("-", "_")
-        val = m.group(2).strip().strip("'"")
+        val = m.group(2).strip().strip("'\"")
         if val: out.append((name, val))
     return out
 

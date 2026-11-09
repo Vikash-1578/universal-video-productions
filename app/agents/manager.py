@@ -10,8 +10,8 @@ log = logging.getLogger("app.agents.manager")
 class ManagerAgent(BaseAgent):
     async def parse_intent(self, text: str) -> dict:
         prompt = (f"You are the Manager of 'Universal World' AI Studio. User said: '{text}'.\n"
-                  f"Respond ONLY in JSON: {{ "intent": "make_video", "topic": "topic" }} OR "
-                  f"{{ "intent": "status" }} OR {{ "intent": "chat", "response": "reply" }}")
+                  f'Respond ONLY in JSON: {{ "intent": "make_video", "topic": "topic" }} OR '
+                  f'{{ "intent": "status" }} OR {{ "intent": "chat", "response": "reply" }}')
         response = await self.hub.llm.generate(prompt)
         try:
             cleaned = response.strip().replace("```json", "").replace("```", "").strip()
