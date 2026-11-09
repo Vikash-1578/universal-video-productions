@@ -11,7 +11,7 @@ def load_dotenv(path: Path) -> dict[str, str]:
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line: continue
         k, _, v = line.partition("=")
-        v = v.strip().strip("'"")
+        v = v.strip().strip("'\"")
         out[k.strip()] = v
     return out
 
@@ -23,7 +23,7 @@ def parse_keys(text: str) -> list[tuple[str, str]]:
         m = re.match(r"^([A-Za-z][A-Za-z0-9_ .-]*?)\s*[:=]\s*(.+)$", line)
         if not m: continue
         name = m.group(1).strip().lower().replace(" ", "_").replace("-", "_")
-        val = m.group(2).strip().strip("'"")
+        val = m.group(2).strip().strip("'\"")
         if val: out.append((name, val))
     return out
 
@@ -31,6 +31,7 @@ def parse_keys(text: str) -> list[tuple[str, str]]:
 class Settings:
     bot_token: str = ""
     owner_id: int = 0
+    allowed_user_ids: list[int] = field(default_factory=list)
     base_dir: Path = field(default_factory=Path.cwd)
     data_dir: Path = Path("data")
     keys: list[tuple[str, str]] = field(default_factory=list)
@@ -38,6 +39,9 @@ class Settings:
     max_heavy_workers: int = 1
     max_light_workers: int = 2
     fps: int = 30
+    video_width: int = 1280
+    video_height: int = 720
+    voice: str = "hi-IN-MadhurNeural"
     temp_retention_days: int = 7
     ffmpeg: str = ""
     log_level: str = "INFO"
@@ -67,7 +71,11 @@ def load_settings(base_dir: Path | None = None, env: dict[str, str] | None = Non
     hub = raw.get("hub", {})
     owner_raw = env.get("OWNER_ID") or str(hub.get("owner_id", "")) or env.get("TELEGRAM_ALLOWED_USER_IDS", "").split(",")[0]
     try: owner = int(str(owner_raw).strip() or 0)
-    except: owner = 0
+    except ValueError: owner = 0
+    allowed: list[int] = [owner] if owner else []
+    for part in [*str(env.get("TELEGRAM_ALLOWED_USER_IDS", "")).split(","), *map(str, hub.get("allowed_user_ids", []))]:
+        part = part.strip()
+        if part.lstrip("-").isdigit() and int(part) not in allowed: allowed.append(int(part))
     keys_file = base / env.get("AI_KEYS_FILE", "keys.txt")
     keys = parse_keys(keys_file.read_text(encoding="utf-8-sig")) if keys_file.exists() else []
     keys += parse_keys(env.get("AI_KEYS", "").replace(",", "\n"))
@@ -84,11 +92,14 @@ def load_settings(base_dir: Path | None = None, env: dict[str, str] | None = Non
     render = raw.get("render", {})
     return Settings(
         bot_token=env.get("BOT_TOKEN", "") or env.get("TELEGRAM_BOT_TOKEN", ""),
-        owner_id=owner, base_dir=base, data_dir=data_dir, keys=keys,
-        timezone=hub.get("timezone", env.get("HUB_TZ", "Asia/Kolkata")),
+        owner_id=owner, allowed_user_ids=allowed, base_dir=base, data_dir=data_dir, keys=keys,
+        timezone=env.get("HUB_TZ") or hub.get("timezone", "Asia/Kolkata"),
         max_heavy_workers=int(hub.get("max_heavy_workers", 1)),
         max_light_workers=int(hub.get("max_light_workers", 2)),
         fps=int(render.get("fps", 30)),
+        video_width=int(render.get("width", 1280)),
+        video_height=int(render.get("height", 720)),
+        voice=env.get("TTS_VOICE", render.get("voice", "hi-IN-MadhurNeural")),
         temp_retention_days=int(raw.get("storage", {}).get("temp_retention_days", 7)),
         ffmpeg=env.get("FFMPEG_PATH", raw.get("tools", {}).get("ffmpeg", "")),
         log_level=env.get("LOG_LEVEL", hub.get("log_level", "INFO")),

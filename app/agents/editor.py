@@ -5,10 +5,14 @@ import logging
 
 log = logging.getLogger("app.agents.editor")
 
-class EditorAgent(BaseAgent):
-    async def execute(self, project_id: int, input_data: dict) -> dict:
-        output_path = await self.hub.renderer.render_project(self.hub, project_id)
-        return {"video_path": str(output_path), "status": "rendered"}
 
-    async def verify(self, project_id: int, output_data: dict) -> bool:
-        return "video_path" in output_data
+class EditorAgent(BaseAgent):
+    max_attempts = 2
+
+    async def execute(self, project_id: int, state: dict) -> dict:
+        output = self.hub.projects.folder(project_id, "exports") / "final_video.mp4"
+        path = await self.hub.renderer.render(state.get("scenes", []), output)
+        return {"video_path": str(path)}
+
+    async def verify(self, project_id: int, output: dict) -> bool:
+        return bool(output.get("video_path"))

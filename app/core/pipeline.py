@@ -26,8 +26,9 @@ AGENT_SEQUENCE = [
     AgentState.CHECKING_VIRALITY, AgentState.QUALITY_CONTROL, AgentState.VOICEOVER,
     AgentState.SOURCING_MEDIA, AgentState.CHECKING_MEDIA, AgentState.EDITING,
     AgentState.VERIFYING_VIDEO, AgentState.THUMBNAIL_GEN, AgentState.SEO_OPTIMIZATION,
-    AgentState.ANALYZING, AgentState.CONFIGURING,
 ]
+# ANALYZING and CONFIGURING are left out: their agents are placeholders that
+# need published-video analytics, which the pipeline does not have yet.
 
 def get_next_state(current: AgentState) -> AgentState | None:
     try:
