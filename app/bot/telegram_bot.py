@@ -5,12 +5,15 @@ Any other text goes through the Manager agent (make a video, status, or chat).
 
 Only user IDs in ``settings.allowed_user_ids`` may use it. With no IDs
 configured the bot runs in setup mode and only tells people their user ID.
+Jobs are Telegram projects (job number = project ID). Each project records
+its chat, so when the bot starts it resumes every unfinished one from its
+last checkpoint and delivers results that were never sent.
+
 All messages are plain text (no Markdown) so user or error text can never
 break message parsing.
 """
 from __future__ import annotations
 import asyncio
-import itertools
 import logging
 import time
 from dataclasses import dataclass, field
@@ -21,6 +24,7 @@ log = logging.getLogger("app.bot")
 TELEGRAM_LIMIT = 4000          # Telegram allows 4096 chars; keep a margin
 BOT_UPLOAD_LIMIT = 50 * 1024**2  # Bot API upload limit for send_video
 PROGRESS_LINES = 14
+MAX_RESUMES = 3  # a project that keeps dying (e.g. out of memory) is given up after this
 UPLOAD_TIMEOUT = 600
 
 HELP = (
@@ -48,11 +52,12 @@ def chunks(text: str, size: int = TELEGRAM_LIMIT) -> list[str]:
 
 @dataclass
 class Job:
-    id: int
+    id: int  # the project ID
     chat_id: int
     user_id: int
     topic: str
-    project_id: int | None = None
+    resume: bool = False
+    cancel_requested: bool = False
     stage: str = "queued"
     created: float = field(default_factory=time.monotonic)
     started: float | None = None
@@ -63,9 +68,8 @@ class Job:
     def describe(self) -> str:
         clock = time.monotonic() - (self.started or self.created)
         when = f"{int(clock // 60)}m{int(clock % 60):02d}s"
-        project = f", project {self.project_id}" if self.project_id else ""
         state = f"running {when}" if self.started else f"queued {when}"
-        return f"#{self.id} \"{self.topic}\"{project}: {self.stage} ({state})"
+        return f"#{self.id} \"{self.topic}\": {self.stage} ({state})"
 
 
 class StudioBot:
@@ -74,7 +78,6 @@ class StudioBot:
         ids = hub.settings.allowed_user_ids if allowed_user_ids is None else allowed_user_ids
         self.allowed = {int(i) for i in ids}
         self.jobs: dict[int, Job] = {}
-        self._ids = itertools.count(1)
         self._slots = asyncio.Semaphore(max_parallel or hub.settings.max_heavy_workers or 1)
 
     # ---------------------------------------------------------------- access
@@ -137,6 +140,7 @@ class StudioBot:
             return
         for job in targets:
             if job.task and not job.task.done():
+                job.cancel_requested = True
                 job.task.cancel()
         names = ", ".join(f"#{j.id}" for j in targets)
         await self._send(context.bot, chat_id, f"🛑 Cancelling {names}. "
@@ -171,32 +175,78 @@ class StudioBot:
             return "😴 No videos in progress. Send /make <topic> to start one."
         return "📋 In progress:\n" + "\n".join(j.describe() for j in sorted(active, key=lambda j: j.id))
 
+    def _busy(self) -> bool:
+        return self._slots.locked() or any(j.started and j.task and not j.task.done() for j in self.jobs.values())
+
     async def start_job(self, bot, chat_id: int, user_id: int, topic: str) -> Job:
-        job = Job(id=next(self._ids), chat_id=chat_id, user_id=user_id, topic=topic[:300])
-        self.jobs[job.id] = job
-        busy = sum(1 for j in self.jobs.values() if j.started and j.task and not j.task.done())
-        queued = " (queued, another video is rendering)" if self._slots.locked() or busy else ""
+        topic = topic[:300]
+        queued = " (queued, another video is rendering)" if self._busy() else ""
+        pid = self.hub.projects.create(topic, meta={"source": "telegram", "chat_id": chat_id,
+                                                    "user_id": user_id, "delivered": False})
+        job = Job(id=pid, chat_id=chat_id, user_id=user_id, topic=topic)
         msg = await self._send(bot, chat_id, f"🎬 Job #{job.id}: \"{job.topic}\"{queued}\nUse /status to check progress.")
         job.progress_message_id = getattr(msg, "message_id", None)
-        job.task = asyncio.create_task(self._run_job(bot, job), name=f"job-{job.id}")
+        self._launch(bot, job)
         return job
 
+    def _launch(self, bot, job: Job) -> None:
+        self.jobs[job.id] = job
+        job.task = asyncio.create_task(self._run_job(bot, job), name=f"job-{job.id}")
+
+    async def resume_unfinished(self, bot) -> list[Job]:
+        """Restart every Telegram project that was queued, running, or finished but never delivered."""
+        resumed = []
+        for project in self.hub.projects.list_projects():
+            meta = project.get("meta") or {}
+            status = project.get("status")
+            if meta.get("source") != "telegram" or meta.get("delivered") or project["id"] in self.jobs:
+                continue
+            if status not in ("queued", "running", "success", "failed"):
+                continue
+            pid, chat_id, user_id = project["id"], meta.get("chat_id"), meta.get("user_id")
+            if chat_id is None or user_id not in self.allowed:
+                self.hub.projects.update(pid, status="cancelled" if status in ("queued", "running") else status,
+                                         meta={"delivered": True, "skipped": "user no longer allowed"})
+                continue
+            attempts = int(meta.get("resumes", 0)) + 1
+            if status in ("queued", "running") and attempts > MAX_RESUMES:
+                self.hub.projects.update(pid, status="failed", meta={"delivered": True})
+                await self._send(bot, chat_id, f"❌ Job #{pid} \"{project['topic']}\" was interrupted "
+                                               f"{MAX_RESUMES} times, giving up. Use /make to try again.")
+                continue
+            self.hub.projects.update(pid, meta={"resumes": attempts})
+            job = Job(id=pid, chat_id=chat_id, user_id=user_id, topic=project["topic"], resume=True)
+            if status in ("queued", "running"):
+                stage = (project.get("pipeline") or {}).get("stage") or "the start"
+                where = "from the queue" if status == "queued" else f"at {stage}"
+                msg = await self._send(bot, chat_id, f"♻️ Bot restarted. Resuming job #{pid} \"{job.topic}\" {where}.")
+                job.progress_message_id = getattr(msg, "message_id", None)
+            self._launch(bot, job)
+            resumed.append(job)
+        if resumed:
+            log.info("Resumed %d unfinished job(s): %s", len(resumed), ", ".join(f"#{j.id}" for j in resumed))
+        return resumed
+
     async def _run_job(self, bot, job: Job) -> None:
+        notify = lambda text: self._progress(bot, job, text)  # noqa: E731
         try:
             async with self._slots:
                 job.started = time.monotonic()
-                job.project_id = self.hub.projects.create(job.topic)
                 job.stage = "starting"
-                result = await self.hub.orchestrator.run_pipeline(
-                    job.project_id, job.topic, notify=lambda text: self._progress(bot, job, text))
+                result = await self.hub.orchestrator.run_pipeline(job.id, job.topic, notify=notify,
+                                                                  resume=job.resume)
             await self._deliver(bot, job, result)
+            self.hub.projects.update(job.id, meta={"delivered": True})
         except asyncio.CancelledError:
-            job.stage = "cancelled"
-            await self._send(bot, job.chat_id, f"🛑 Job #{job.id} \"{job.topic}\" cancelled.")
+            if job.cancel_requested:  # /cancel; otherwise the bot is shutting down and resumes later
+                job.stage = "cancelled"
+                self.hub.projects.update(job.id, status="cancelled", meta={"delivered": True})
+                await self._send(bot, job.chat_id, f"🛑 Job #{job.id} \"{job.topic}\" cancelled.")
             raise
         except Exception as e:
             job.stage = "crashed"
             log.exception("Job %s crashed", job.id)
+            self.hub.projects.update(job.id, status="failed", meta={"delivered": True})
             await self._send(bot, job.chat_id, f"❌ Job #{job.id} crashed: {e}")
         finally:
             self.jobs.pop(job.id, None)
@@ -257,7 +307,7 @@ class StudioBot:
             lines += ["", "Tags: " + ", ".join(seo["tags"])]
         if state.get("warnings"):
             lines += ["", "⚠️ Warnings:"] + [f"- {w}" for w in state["warnings"]]
-        lines += ["", f"📂 Project {job.project_id}: {self.hub.projects.folder(job.project_id)}"]
+        lines += ["", f"📂 Project {job.id}: {self.hub.projects.folder(job.id)}"]
         await self._send(bot, job.chat_id, "\n".join(lines))
 
     # --------------------------------------------------------------- helpers
@@ -280,12 +330,16 @@ class StudioBot:
     def build_application(self, token: str):
         from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
+        async def post_init(app) -> None:
+            await self.resume_unfinished(app.bot)
+
         async def post_shutdown(app) -> None:
             await self.shutdown()
             await self.hub.aclose()
 
         app = (Application.builder().token(token)
                .concurrent_updates(True)
+               .post_init(post_init)
                .post_shutdown(post_shutdown)
                .build())
         app.add_handler(CommandHandler(["start", "help"], self.cmd_start))

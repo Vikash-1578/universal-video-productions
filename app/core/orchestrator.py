@@ -56,7 +56,8 @@ class Orchestrator:
         except Exception as e:  # a failed progress message must never kill the pipeline
             log.warning("Progress notification failed: %s", e)
 
-    async def run_pipeline(self, project_id: int, topic: str, notify: Notify | None = None) -> dict:
+    async def run_pipeline(self, project_id: int, topic: str, notify: Notify | None = None,
+                           resume: bool = False) -> dict:
         """Run every stage for one project, sharing a single ``state`` dict.
 
         Each agent sees the whole state (topic, report, script, scenes, ...)
@@ -64,12 +65,30 @@ class Orchestrator:
         feedback is stored under ``state["feedback"][<target stage>]`` and the
         pipeline goes back to that stage, at most MAX_REGRESSIONS times per
         check.
+
+        Before every stage the state and the stage about to run are saved to
+        the project. With ``resume=True`` the run continues from that
+        checkpoint, re-running the stage that was interrupted.
         """
         state: dict = {"topic": topic, "feedback": {}, "warnings": []}
         regressions: dict[AgentState, int] = {}
         current: AgentState | None = AGENT_SEQUENCE[0]
 
+        if resume:
+            project = self.hub.projects.get_project(project_id)
+            if project.get("status") in ("success", "failed"):
+                return self.result_from_project(project)
+            saved = project.get("pipeline") or {}
+            state = {**state, **(project.get("state") or {})}
+            regressions = {AgentState[k]: v for k, v in (saved.get("regressions") or {}).items()
+                           if k in AgentState.__members__}
+            current = self._restore_stage(saved.get("stage"))
+            where = current.name if current else "the end"
+            await self._notify(notify, f"♻️ Resuming at {where}")
+
+        self.hub.projects.set_status(project_id, "running")
         while current is not None:
+            self._checkpoint(project_id, state, current, regressions)
             await self._notify(notify, AGENT_DESCRIPTIONS.get(current, f"Processing {current.name}..."))
             agent = self.hub.agents.get(current)
             if agent is None:
@@ -86,7 +105,6 @@ class Orchestrator:
                     state["feedback"][target.name] = feedback
                     await self._notify(notify, f"⚠️ Quality Alert! Sending back to {target.name} "
                                                f"(retry {used + 1}/{MAX_REGRESSIONS}): {feedback}")
-                    self.hub.projects.save_state(project_id, state)
                     current = target
                     continue
                 if current in SOFT_CHECKS:
@@ -95,15 +113,51 @@ class Orchestrator:
                     current = get_next_state(current)
                     continue
                 state["error"] = f"{current.name}: {feedback}"
-                self.hub.projects.save_state(project_id, state)
+                self.hub.projects.update(project_id, status="failed", state=state,
+                                         pipeline=self._pipeline(current, regressions))
                 await self._notify(notify, f"❌ Critical Failure at {current.name}: {feedback}")
                 return {"status": "failed", "project_id": project_id, "stage": current.name,
                         "error": feedback, "state": state}
 
             state.update(updates)
             state["feedback"].pop(current.name, None)  # this stage's fix request is handled
-            self.hub.projects.save_state(project_id, state)
             current = get_next_state(current)
 
+        self.hub.projects.update(project_id, status="success", state=state,
+                                 pipeline={"stage": AgentState.COMPLETED.name,
+                                           "regressions": {k.name: v for k, v in regressions.items()}})
         await self._notify(notify, "🎉 Mission Accomplished! Video is ready.")
         return {"status": "success", "project_id": project_id, "state": state}
+
+    @staticmethod
+    def _pipeline(stage: AgentState, regressions: dict[AgentState, int]) -> dict:
+        return {"stage": stage.name, "regressions": {k.name: v for k, v in regressions.items()}}
+
+    def _checkpoint(self, project_id: int, state: dict, stage: AgentState, regressions: dict) -> None:
+        self.hub.projects.save_state(project_id, state, self._pipeline(stage, regressions))
+
+    @staticmethod
+    def _restore_stage(name: str | None) -> AgentState | None:
+        """The stage to continue from; stages no longer in the sequence skip ahead."""
+        if not name:
+            return AGENT_SEQUENCE[0]
+        stage = AgentState.__members__.get(name)
+        if stage is None:
+            return AGENT_SEQUENCE[0]
+        if stage in AGENT_SEQUENCE:
+            return stage
+        if stage is AgentState.COMPLETED:
+            return None
+        later = [s for s in AGENT_SEQUENCE if s.value > stage.value]
+        return later[0] if later else None
+
+    @staticmethod
+    def result_from_project(project: dict) -> dict:
+        """Rebuild run_pipeline's return value for a project that already finished."""
+        state = project.get("state") or {}
+        result = {"status": project.get("status"), "project_id": project.get("id"), "state": state}
+        if project.get("status") == "failed":
+            stage = (project.get("pipeline") or {}).get("stage", "?")
+            error = state.get("error", "unknown error")
+            result.update(stage=stage, error=error.split(": ", 1)[-1] if error.startswith(stage) else error)
+        return result

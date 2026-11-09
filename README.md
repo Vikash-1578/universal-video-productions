@@ -33,10 +33,17 @@ limit; otherwise the file path), the thumbnail, and the SEO title/description/ta
 one at a time by default (`[hub] max_heavy_workers` in config.toml); extra jobs queue.
 Only people in the allowed list can use the bot, since every video spends your API quota.
 
+**Restarts are safe.** The pipeline saves a checkpoint (state + next stage) to `project.json`
+before every stage. When the bot starts it resumes every unfinished video from the stage that was
+interrupted, keeping the stages already done, and sends any finished result that was never
+delivered. A video interrupted 3 times is given up. `/cancel`led videos are not resumed.
+Job numbers are project IDs, so they stay the same across restarts.
+
 ## Run from the command line
 
 ```bash
 python -m app "The mystery of the Kailasa temple"
+python -m app --resume 7      # continue interrupted project 7
 ```
 
 Output goes to `data/projects/<id>/`: `exports/final_video.mp4`, `exports/thumbnail.jpg`,

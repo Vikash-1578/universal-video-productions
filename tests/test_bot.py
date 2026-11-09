@@ -127,7 +127,7 @@ async def test_cancel_and_queue(make_hub):
     bot, hub = FakeBot(), make_hub()
     release = asyncio.Event()
 
-    async def slow_pipeline(project_id, topic, notify=None):
+    async def slow_pipeline(project_id, topic, notify=None, resume=False):
         await notify(f"working on {topic}")
         await release.wait()
         return {"status": "failed", "stage": "X", "error": "stopped", "state": {}}

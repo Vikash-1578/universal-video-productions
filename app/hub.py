@@ -92,6 +92,11 @@ class Hub:
         log.info("Project %d: %s", project_id, topic)
         return await self.orchestrator.run_pipeline(project_id, topic, notify)
 
+    async def resume_video(self, project_id: int, notify: Notify | None = None) -> dict:
+        """Continue an interrupted project from its last checkpoint."""
+        topic = self.projects.get_project(project_id)["topic"]
+        return await self.orchestrator.run_pipeline(project_id, topic, notify, resume=True)
+
     async def aclose(self) -> None:
         for service in (self.llm, self.images):
             close = getattr(service, "aclose", None)
